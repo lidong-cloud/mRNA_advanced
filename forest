@@ -1,0 +1,181 @@
+#!/usr/bin/Rscript
+suppressPackageStartupMessages({
+  library(argparser)
+})
+
+parse <- arg_parser("=====================================================================\nThis script is used for Multivariate Cox regression analysis and plot forest\n=====================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--exp_file", default = 'supp/DEG/Tumor__Normal/Gene_expr_diff.xls',
+    help="Gene expression file of DEG results(such as:supp/DEG/Tumor__Normal/Gene_expr_diff.xls)")
+parse <- add_argument(parse, "--meta_file", 
+    help="Clinical information file containing survival information (such as: TCGA-LUSC_clinical.xls)")
+parse <- add_argument(parse, "--gene", default = 'all gene',
+    help="The gene used for Multivariate Cox regression analysis, Please separate them with commas")
+parse <- add_argument(parse, "--ps", default=0.01,
+    help="The pvalue cut off for Survival analyse, If <gene> is provided, this parameter will no longer be used")
+parse <- add_argument(parse, "--logfc", default=1,
+    help="The logfc cut off for the DEG analyse,  If <gene> is provided, this parameter will no longer be used")
+parse <- add_argument(parse, "--pd", default=0.05,
+    help="The pvalue cut off for the DEG analyse,  If <gene> is provided, this parameter will no longer be used")
+parse <- add_argument(parse, "--outdir", default="./supp/Forest",
+    help="Output directory of Multivariate Cox regression analysis results")
+
+
+argv <- parse_args(parse)
+if(is.na(argv$meta_file) | !file.exists(argv$exp_file)){cat('\nThe parameters <exp_file> and <config_file> is required\n\n');print(parse);quit()}
+exp_file <- argv$exp_file
+meta_file <- argv$meta_file
+gene <- argv$gene
+ps <- argv$ps
+logfc <- as.numeric(argv$logfc)
+pd <- as.numeric(argv$pd)
+outdir <- argv$outdir
+
+
+suppressPackageStartupMessages({
+library(survival)
+library(survminer)
+library(cowplot)
+library(table1)
+library(tibble)
+library(dplyr)
+library(stringr)
+library(tableone)
+library(grid)
+library(forestplot)
+})
+
+# exp_file <- 'G:/Ledug/Downloads/Gene_expr_diff.xls'
+# meta_file <- 'G:/Ledug/Downloads/TCGA-LUAD_clinical.xls'
+# outdir <- 'G:/Ledug/Downloads/'
+# ps <- 0.001
+# logfc <- 2
+# pd <- 0.01
+# gene <- 'all gene'
+
+################################################################################
+Sort_data <- function(exp_file,meta_file,logfc,pvalue,gene){
+  exp <- read.csv(exp_file,sep = '\t',header = T,row.names = 1)
+  meta <- read.csv(meta_file,sep = '\t',header = T,row.names = 1)
+  
+  if (gene == 'all gene') {
+    exp <- exp[which(abs(exp$logFC) > logfc & exp$P.Value < pvalue),c(1:(ncol(exp)-6))]
+  }else {
+    gene <- unique(strsplit(gene,',')[[1]])
+    exp <- exp[intersect(rownames(exp),gene),]
+    meta <- meta[,c("Time","Event",intersect(colnames(meta),gene))]
+  }
+  
+  names <- intersect(colnames(exp),rownames(meta))
+  meta <- meta[names,];meta[meta=='']<-NA
+  exp <- t(exp[,names])
+  
+  colnames(exp) <- gsub('-','_',colnames(exp))
+  dat=na.omit(cbind(meta,exp))
+  return(dat)
+}
+
+
+Survival_cut <- function(dat,pvalue,outdir){
+  feature <- list()
+  for (i in colnames(dat)[-c(1,2)]) {
+    data <- dat[,c("Time","Event",i)]
+    ifelse(is.character(data[,3]),data$group<-data[,3],
+           data$group<-ifelse(data[,3]>median(data[,3]),"High","Low"))
+    sfit <- survdiff(Surv(Time, Event)~group, data=data)
+    Pvalue <- 1 - pchisq(sfit$chisq, length(sfit$n) -1)
+    if (Pvalue < pvalue) {
+      cat(paste0('The survival analysis of this gene was significant: [',i,']\n'));feature[i] <- Pvalue
+    }
+  }
+  return(feature)
+}
+
+
+Cox_data <- function(model,outdir){
+  x <- summary(model)
+  multi1 <- as.data.frame(round(x$conf.int[, c(1, 3, 4)], 2))
+  multi2 <- ShowRegTable(model, exp = TRUE, digits = 2, pDigits = 3,
+                         printToggle = TRUE, quote = FALSE, ciFun = confint)
+  result <- cbind(multi1, multi2)
+  result <- rownames_to_column(result,var = 'Characteristics')
+  
+  col_namw <- c("Characteristics", NA, NA, NA, "HR (95%CI)", "Pvalue")
+  if (!is.null(model$xlevels)) {
+    result$Characteristics <- str_remove(result$Characteristics, paste(names(model$xlevels),collapse = '|'))
+    maker <- sapply(model$xlevels, function(x) x[2])
+    for (i in result$Characteristics) {
+      if (i %in% unlist(model$xlevels)) {
+        if (i %in% maker) {
+          n <- which(result$Characteristics == i)
+          type <- names(maker)[grep(i,maker)]
+          name <- paste0(type,' [',model$xlevels[[type]][1],']')
+          row <- c(name,NA,NA,NA,NA,NA)
+          result <- rbind(result[1:(n-1),],row,result[c(n:nrow(result)),])
+        }
+        result[result$Characteristics==i,1] <- paste0('   [',i,']')
+      }
+    }
+    result[1,] <- col_namw
+  }else{
+    result <- rbind(col_namw,result)
+  }
+  result <- result[!result$`upper .95` %in% Inf,]
+  result[,2:4] <- lapply(result[,2:4], as.numeric)
+  write.table(result, paste0(outdir, "/Multivariate_Cox_regression.xls"), 
+              sep ="\t",quote=F,col.names =F,row.names=F)
+  return(result)
+}
+
+
+Forest_plot <- function(result,outdir){
+  line <- list()
+  line[['1']] <- gpar(lty = 1, lwd = 2)
+  line[['2']] <- gpar(lty = 2)
+  line[[as.character(nrow(result)+1)]] <- gpar(lty = 1, lwd = 2)
+  
+  p <- forestplot(
+    result[, c(1,5,6)],   # 选择要在森林图中显示的数据列，第1、5、6列
+    mean = result[, 2],     # 指定均值数据列（HR），它将显示为森林图的小方块
+    lower = result[, 3],    # 指定95%置信区间的下限数据列
+    upper = result[, 4],    # 指定95%置信区间的上限数据列，这些数据将显示为线段穿过方块
+    zero = 1,               # 设置零线或参考线为HR=1，这是x轴的垂直线
+    boxsize = 0.3,          # 设置小方块的大小
+    graph.pos = 4,          # 指定森林图应该插入到图形中的位置，这里是第2列
+    is.summary = c(T,c(grepl(' \\[',result$Characteristics,useBytes = T) & !startsWith(result$Characteristics,' '))[2:nrow(result)]),  
+    title = "Multivariate Cox regression forest",
+    hrzl_lines = line,
+    lwd.zero = 1,                    # 均值线的宽度
+    lwd.ci = 2,                    # 置信区间线的宽度
+    lwd.xaxis = 1,                   # x轴线的宽度
+    lty.ci = 1.5,                    # 置信区间线的样式
+    clip = c(0, 5),                # x轴的截断范围
+    ci.vertices = T,                 # 是否显示置信区间的顶点
+    ci.vertices.height = 0.2,        # 置信区间顶点的高度
+    ineheight = unit(8, 'mm'),       # 森林图内线的高度
+    line.margin = unit(8, 'mm'),     # 森林图线的边距
+    colgap = unit(2, 'mm'),          # 森林图中方框的间距
+    fn.ci_norm = "fpDrawDiamondCI",  # 置信区间的形状（这里是钻石形）
+    col = fpColors(                  # 颜色设置
+      box = "blue",                 # 方框颜色
+      lines = "blue",               # 线条颜色
+      zero = "grey60")                 # 均值为0时的颜色
+  )
+  
+  h<-nrow(result)/3
+  pdf(paste0(outdir,'/Multivariate_Cox_regression.pdf'),w=7,h=h)
+  print(p);dev.off();dev.off()
+}
+################################################################################
+if (!file.exists(outdir)) {dir.create(outdir)}
+dat <- Sort_data(exp_file,meta_file,logfc,pd,gene)
+
+if (gene == 'all gene') {
+  feature <- Survival_cut(dat,ps,outdir)
+  dat <- dat[,c('Time','Event',names(feature))]
+}
+
+model <- coxph(formula = Surv(Time, Event) ~ ., data = dat)
+df <- Cox_data(model,outdir)
+Forest_plot(df,outdir)
+
