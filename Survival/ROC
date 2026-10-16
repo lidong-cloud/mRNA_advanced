@@ -1,0 +1,154 @@
+#!/nas/software/miniconda3/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("===================================================================\nThis script is used to analyze the single gene prognosis and draw the ROC curve of the gene. If the final number of genes is less than 8, we will draw a general picture.\n===================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--exp_file", 
+    help="DEG result file containing gene expression information (such as: supp/DEG/Normal__Tumor/Gene_expr_diff.xls)")
+parse <- add_argument(parse, "--config_file",
+    help="config file containing sample information")
+parse <- add_argument(parse, "--gene", default = 'all gene',
+    help="The gene used for ROC analyse, If there are multiple genes, separate them with commas.")
+parse <- add_argument(parse, "--auc", default = 0.7,
+    help="The auc cut off for the ROC analyse.")
+parse <- add_argument(parse, "--threads", default = 10,
+    help="Number of threads that can be used")
+parse <- add_argument(parse, "--number", default = 20,
+    help="Output the number of single gene ROC curve pictures.")
+parse <- add_argument(parse, "--outdir",
+    help="Output directory of this result.default = './GSE*_supp/ROC/'")
+
+argv <- parse_args(parse)
+if(is.na(argv$exp_file)|is.na(argv$config_file)){cat('\nThe parameters <exp_file> and <config_file> is required\n\n');print(parse);quit()}
+exp_file <- argv$exp_file
+config_file <- argv$config_file
+gene <- argv$gene
+auc <- as.numeric(argv$auc)
+threads <- as.numeric(argv$threads)
+number <- as.numeric(argv$number)
+
+if (!is.na(argv$outdir)) {
+  outdir <- argv$outdir
+}else if(endsWith(strsplit(exp_file,'/')[[1]][1],'_supp') & is.na(argv$outdir)) {
+  outdir <- paste0(strsplit(exp_file,'/')[[1]][1],'/ROC/')
+}else if(endsWith(strsplit(exp_file,'/')[[1]][2],'_supp') & is.na(argv$outdir)) {
+  outdir <- paste0(strsplit(exp_file,'/')[[1]][2],'/ROC/')
+}else{outdir <- './supp/ROC/'}
+
+suppressPackageStartupMessages({
+library(pROC)
+library(ggplot2)
+library(foreach)
+library(doParallel)
+})
+
+
+# exp_file <- 'G:/Ledug/Downloads/Gene_expr_diff.xls'
+# config_file <- 'G:/Ledug/Downloads/GSE202413_config'
+# gene <- 'all gene'
+# auc <- '0.70'
+# threads <- '10'
+# outdir <- 'G:/Ledug/Downloads/'
+
+
+cl <- makeCluster(as.numeric(threads))
+registerDoParallel(cl)
+################################################################################
+color <- c("#1F78B4","#62A3CB","#A6CEE3","#33A02C","#72BF5A","#B2DF8A","#df65b0",
+         "#FDBF6F","#FE9F37","#FF7F00","#696969","#CAB2D6","#B69ACA","#A383BE",
+         "#906BB2","#7D54A5","#6A3D9A","#E64B35FF","#4DBBD5FF","#00A087FF")
+
+Sort_data <- function(exp_file,config_file,gene) {
+  exp <- read.csv(exp_file, header = T,sep = '\t',row.names = 1)
+  config <- read.csv(config_file, header = F,sep = '\t',row.names = 1)
+  
+  if (gene!='all gene') {
+    gene <- intersect(strsplit(gene,',')[[1]],rownames(exp))
+    exp <- exp[gene,]
+    }
+  gene <- exp[,c('logFC','P.Value')]
+  
+  exp <- as.data.frame(t(exp[,1:(ncol(exp)-6)]))
+  Type <- config[rownames(exp),'V2']
+  exp <- cbind(Type,exp)
+  cat("\n<========================Data processing completed========================>\n\n")
+  
+  return(list(exp,gene))
+}
+
+ROC_analysis <- function(exp,gene,auc,color,number,outdir){
+  ROC <- list()
+  for (i in rownames(gene)) {
+    suppressMessages(R <- roc(exp$Type,exp[,i]))
+    if (R$auc > as.numeric(auc)) {ROC[[i]] <- R}
+  }
+  cat("\n<=====================Gene AUC calculation completed======================>\n\n")
+
+  if(length(names(ROC))>number){gname <- names(ROC)[1:number]}else{gname <- names(ROC)}
+  cat('\nDrawing and table processing......\n\n')
+  foreach(i=gname) %dopar% {
+    library(pROC);library(ggplot2)
+    col <- sample(color,size = 1)
+    
+    p <- ggroc(ROC[[i]],legacy.axes = T,size = 1,color = col) +
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), 
+                   colour = "grey", linetype = "dashed") +
+      annotate("text",x = 0.60, y = 0.15, size = 4,
+               label = paste("AUC of",i,'=',format(round(as.numeric(ROC[[i]]$auc),3),nsmall = 3)),color = col) +
+      theme_test() + theme(axis.title = element_text(size = 14))
+    
+    pdf(paste0(outdir,'/ROC_curve_',i,'.pdf'),w=3,h=3)
+    print(p);dev.off()
+  }
+  return(ROC)
+}
+
+ROC_plot <- function(ROC,color,outdir){
+  col <- sample(color,size = length(ROC))
+  p <- ggroc(ROC,legacy.axes = T,size = 1) + theme_test() +
+    scale_color_manual(values = col)+
+    geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), 
+                 colour = "grey", linetype = "dashed") +
+    theme(legend.position = 'none',axis.title = element_text(size = 14))
+  
+  
+  for (n in 1:length(ROC)) {
+    gid <- names(ROC)[n]
+    p <- p + annotate("text",x = 0.6, y = ifelse(length(ROC)<5,0.1*n,0.07*(n-1)), size = 4,
+                      label = paste("AUC of ",gid,' = ',format(round(as.numeric(ROC[[gid]]$auc),3),nsmall = 3)),color = col[n])
+  }
+  
+  pdf(paste0(outdir,'/Multiple_genes_ROC.pdf'),w=3,h=3)
+  print(p);dev.off()
+}
+
+write_data <- function(ROC,gene,outdir){
+  for (g in names(ROC)) {gene[g,'AUC'] <- ROC[[g]]$auc}
+  gene <- gene[intersect(names(ROC),rownames(gene)),]
+  gene <- gene[,c('AUC','logFC','P.Value')]
+  colnames(gene) <- c('AUC','DEG_logFC','DEG_pvalue')
+  
+  write.table(cbind(Geneid=rownames(gene),gene),
+              paste0(outdir, "/AUC_of_Allgene.xls"),
+              sep ="\t",quote=F,col.names =T,row.names=F)
+}
+################################################################################
+unlink(outdir,recursive = T);dir.create(outdir)
+
+df <- Sort_data(exp_file,config_file,gene)
+
+ROC <- ROC_analysis(df[[1]],df[[2]],auc,color,number,outdir)
+
+if (length(ROC)<8) {cat('\nThe ROC curves of multiple genes are drawn for you.\n\n');ROC_plot(ROC,color,outdir)}else{
+  cat('\nThere are too many genes you provided, so only draw the ROC curve of single gene for you.\n\n')
+  }
+
+write_data(ROC,df[[2]],outdir)
+
+cat("\n\n************************************************\n")
+cat("*                                              *\n")
+cat("*             ROC Analysis complete            *\n")
+cat("*                                              *\n")
+cat("************************************************\n\n")

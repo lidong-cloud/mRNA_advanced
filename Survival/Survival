@@ -1,0 +1,171 @@
+#!/nas/software/miniconda3/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("===================================================================\nThis script is used for Survival analysis of genes.\n===================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--exp_file", 
+    help="Diff gene expression file of DEG results (such as: TCGA-ESCA_supp/DEG/Normal__Tumor/Gene_expr_diff.xls)")
+parse <- add_argument(parse, "--meta_file",
+    help="Clinical information file containing survival information (such as: TCGA-LUSC_clinical.xls)")
+parse <- add_argument(parse, "--gene", default = 'all gene',
+    help="The gene used for Survival analyse, If there are multiple genes, separate them with commas")
+parse <- add_argument(parse, "--samples", default = 'Tumor',
+    help="The sample used for Survival analyse, You can use all samples or just the Tumor sample (Option: 'Tumor' or 'All')")
+parse <- add_argument(parse, "--pvalue", default = 0.05,
+    help="If the significance of the gene is lower than this value, the survival analysis of the gene is no longer carried out")
+parse <- add_argument(parse, "--number", default = 20,
+    help="Output the number of Survival analysis pictures.")
+parse <- add_argument(parse, "--outdir",
+    help="Output directory of this result.default = './TCGA*_supp/Survival/'")
+
+argv <- parse_args(parse)
+if(is.na(argv$exp_file)|is.na(argv$meta_file)){cat('\nThe parameters <exp_file> and <meta_file> is required\n\n');print(parse);quit()}
+if(!argv$samples %in% c('Tumor', 'All')){cat('\nThe parameters <samples> only can be used [Tumor] or [All]\n\n');print(parse);quit()}
+exp_file <- argv$exp_file
+meta_file <- argv$meta_file
+gene <- argv$gene
+samples <- argv$samples
+pvalue <- as.numeric(argv$pvalue)
+number <- as.numeric(argv$number)
+
+if (!is.na(argv$outdir)) {
+  outdir <- argv$outdir
+}else if(endsWith(strsplit(exp_file,'/')[[1]][1],'_supp') & is.na(argv$outdir)) {
+  outdir <- paste0(strsplit(exp_file,'/')[[1]][1],'/Survival/')
+}else if(endsWith(strsplit(exp_file,'/')[[1]][2],'_supp') & is.na(argv$outdir)) {
+  outdir <- paste0(strsplit(exp_file,'/')[[1]][2],'/Survival/')
+}else{outdir <- './supp/Survival/'}
+
+suppressPackageStartupMessages({
+library(survival)
+library(survminer)
+library(cowplot)
+library(table1)
+library(tibble)
+library(dplyr)
+})
+
+# exp_file <- 'G:/Ledug/Desktop/b-handle/text/TCGA-THCA_mRNA.xls'
+# meta_file <- 'G:/Ledug/Desktop/b-handle/text/TCGA-THCA_clinical.xls'
+# gene <- "PDLIM3"
+# pvalue <- 0.001
+# outdir <- 'G:/Ledug/Desktop/b-handle/text/survival/'
+
+Sort_data <- function(exp_file,meta_file,gene,samples){
+  exp <- read.csv(exp_file,sep = '\t',header = T,row.names = 1)
+  meta <- read.csv(meta_file,sep = '\t',header = T,row.names = 1)
+  if(samples=='Tumor'){
+    meta <- meta[meta$Type %in% 'Tumor', setdiff(colnames(meta),'Type')]
+  }
+
+  if (gene == 'all gene') {
+    exp <- exp[,c(1:(ncol(exp)-6))]
+  }else {
+    gene <- unique(strsplit(gene,',')[[1]])
+    exp <- exp[intersect(rownames(exp),gene),]
+    meta <- meta[,c("Time","Event",intersect(colnames(meta),gene))]
+  }
+
+  names <- intersect(colnames(exp),rownames(meta))
+  meta <- meta[names,];meta[meta=='']<-NA
+  exp <- t(exp[,names])
+
+  dat=cbind(meta,exp)
+  cat("\n<========================Data processing completed========================>\n\n")
+  return(dat)
+}
+
+Survival_analysis <- function(dat,pvalue,number,outdir){
+  cat('\nSurvival analysis start......\n\n')
+  feature <- list();n<-1
+  for (gene in colnames(dat)[-c(1,2)]) {
+    data <- na.omit(dat[,c("Time","Event",gene)])
+    ifelse(is.character(data[,3]),data$group<-data[,3],
+           data$group<-ifelse(data[,3]>median(data[,3]),"High","AAA"))
+    if(length(unique(data$group))<2){next}
+    HR <- exp(coxph(Surv(Time, Event)~group,data)$coefficients)
+    names(HR) <- gsub('group','',names(HR))
+    data$group <- ifelse(data[,"group"]=='AAA',"Low",data$group)
+    sfit <- survdiff(Surv(Time, Event)~group, data=data)
+    if(ncol(dat)<20){cat(paste0('\nThe survival pvalue of ',gene,' is: [',format(round(sfit$pvalue,4)),']\n'))}
+    if (sfit$pvalue < pvalue) {
+      line <- c(gene,sfit$pvalue)
+      for (i in 1:length(sfit$n)) {
+        group <- gsub('group=','',names(sfit$n[i]))
+        f <- paste0(group,': HR:',HR[group],'; Number:',
+                    sfit$n[i],'; Death:',sfit$obs[i])
+        line <- c(line,f)
+      }
+      feature[[gene]] <- line
+    }
+    if (sfit$pvalue < pvalue & n < number+1) {
+      if (sfit$pvalue<0.001) {
+          label <- 'Pval < 0.001'
+         }else{label <- paste0('Pval = ',sprintf("%.3f",sfit$pvalue))}
+      label <- paste0('Pval = ',sprintf("%.3f",sfit$pvalue))
+      for (i in 1:length(HR)) {label <- paste0(label,'\nHR(',names(HR)[i],') = ',sprintf("%.3f",HR[i]))}
+
+      cat(paste0('Perform Survival analysis and drawing for this gene: [',gene,']\n'))
+      sfit <- survfit(Surv(Time, Event)~group, data=data)
+      names(sfit$strata) <- gsub('group=','',names(sfit$strata))
+      p<-ggsurvplot(sfit,data=data,pval = F,conf.int = F,
+                    legend.title= gene,censor.shape="|", censor.size = 3,
+                    ggtheme = theme_test(),risk.table.title="",
+                    risk.table = T, risk.table.col = "strata",linetype = "strata",
+                    surv.median.line = "hv", xlab="Time(month)")
+      size <- ifelse(nchar(label)>150,4,ifelse(nchar(label)>90,5,6))
+      p1 <- p$plot+xlab('') + annotate("text", x = 0, y = size*length(sfit$n)/100, label = label,
+                                 size = size,fontface = "italic",hjust=0) +
+                              theme(axis.title = element_text(size = 17),
+                                    legend.text = element_text(size=17),
+                                    legend.title = element_text(size=18))
+      p2 <- p$table + theme(legend.position = 'none',axis.title = element_text(size = 17))
+      h <- min(length(unique(data$group))*0.02+0.20,0.4)
+      nchr <- max(nchar(as.vector(data$group)))
+      if(nchr > 20){w<-0.83;p2<- p2+ylab('')} else if(nchr > 10) {w<-0.92}else{w<-1}
+      p <- ggdraw()+
+        draw_plot(p2, x = 0, y = 0, width = 1, height = h+0.05) + 
+        draw_plot(p1, x = 1-w, y = h, width = w, height = 1-h)
+      pdf(paste0(outdir,'/survival_',gene,'.pdf'),width = 4.8+0.05*nchr,
+          height = 4.8+0.2*length(unique(data$group)),onefile = F)
+      print(p);dev.off();n<-n+1
+    }
+  }
+  cat("\n<=======================Survival analysis completed=======================>\n\n")
+  return(feature)
+}
+
+Statistical <- function(exp_file,feature,outdir){
+  cat('\nOutput survival analysis table......\n\n')
+  df <- matrix(data = NA,nrow = length(feature),
+              ncol = max(sapply(feature,function(x) length(x))))
+  rownames(df)<-names(feature)
+  for (gene in names(feature)) {
+    df[gene,1:length(feature[[gene]])] <- feature[[gene]]
+  }
+  df <- as.data.frame(df)
+  colnames(df) <- c('Geneid','Survival_pvalue',paste0('feature','_',1:(ncol(df)-2)))
+
+  deg <- read.table(exp_file, header=T, sep="\t", quote="")
+  deg <- deg[,c('Geneid','logFC','P.Value')];colnames(deg)<-c('Geneid','DEG_logFC','DEG_pvalue')
+  feature <- left_join(df,deg,by='Geneid')[,c('Geneid','Survival_pvalue','DEG_logFC','DEG_pvalue',paste0('feature','_',1:(ncol(df)-2)))]
+  feature[is.na(feature)] <- ''
+  write.table(feature ,paste0(outdir,'/Survival_of_Allgene.xls'),
+              col.names = T, row.names=F, quote=F, sep='\t')
+}
+######################################################################################
+unlink(outdir,recursive = T);dir.create(outdir)
+
+dat <- Sort_data(exp_file,meta_file,gene,samples)
+
+feature <- Survival_analysis(dat,pvalue,number,outdir)
+
+if(length(feature)>0){Statistical(exp_file,feature,outdir)}else{cat('\nNone of the genes you provided were significant in survival analysis\n')}
+
+cat("************************************************\n")
+cat("*                                              *\n")
+cat("*              Done, done, done                *\n")
+cat("*                                              *\n")
+cat("************************************************\n")
