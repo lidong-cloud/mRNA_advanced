@@ -1,2 +1,63 @@
-# mRNA_advanced
-包含mRNA的WGCNA、免疫浸润、蛋白互作以及针对TCGA的预后和生存分析。
+# mRNA_advanced: 转录组高级分析流程
+
+[![R](https://img.shields.io/badge/R-%3E%3D%204.0-blue.svg)](https://www.r-project.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+本仓库提供了一套针对 **mRNA 转录组数据**（尤其是 TCGA 等公共队列）的高级分析 R 脚本集。覆盖从**共表达网络构建、免疫微环境解析、预后模型构建到蛋白互作网络**的完整下游分析链条，适用于肿瘤与非肿瘤疾病的机制与标志物挖掘。
+
+## ✨ 核心特色
+
+- **全流程覆盖**：从 WGCNA 模块识别到免疫浸润、生存预后与随机森林特征筛选，形成闭环分析。
+- **面向 TCGA 优化**：脚本默认适配 TCGA 数据格式，可直接用于泛癌或特定癌种的预后标志物开发。
+- **模块化设计**：各目录独立，可按需取用，也便于组合成自动化流程。
+- **可视化输出**：内置常见图表绘制（森林图、ROC 曲线、免疫细胞比例图、PPI 网络等）。
+
+## 📁 仓库结构与模块说明
+
+### 🧬 1. `WGCNA` — 加权基因共表达网络分析
+- **功能**：基于表达矩阵构建无尺度共表达网络，识别与临床性状（如肿瘤分期、生存状态、免疫浸润评分）高度相关的基因模块。
+- **典型输出**：模块-性状热图、模块成员基因列表、枢纽基因（Hub genes）鉴定。
+- **输入要求**：标准化后的表达矩阵（FPKM/TPM 或 counts）及对应的临床性状表。
+
+### 🛡️ 2. `Cibersort` — 免疫细胞浸润分析
+- **功能**：基于 CIBERSORT 反卷积算法，从 bulk RNA-seq 数据中估算 **22 种免疫细胞**的相对丰度。
+- **典型输出**：免疫细胞比例堆叠图、免疫细胞相关性热图、高低风险组免疫浸润差异比较。
+- **应用场景**：解析肿瘤微环境（TME）、关联免疫检查点表达、评估免疫治疗响应潜力。
+
+### 📈 3. `Survival` — 生存分析与预后模型
+- 包含两个子模块：
+  - **`Survival`**：单因素/多因素 Cox 回归、Kaplan-Meier 生存曲线、风险评分模型构建与验证。
+  - **`ROC`**：时间依赖 ROC 曲线绘制，评估预后模型在不同时间点的预测效能（AUC）。
+- **应用场景**：筛选独立预后因素、构建风险评分（Risk score）、验证标志物的临床价值。
+
+### 🌲 4. `forest` — 随机森林特征筛选
+- **功能**：利用随机森林（Random Forest）算法进行高维特征降维与重要性排序，筛选关键预后/诊断基因。
+- **典型输出**：基因重要性排序图、误差率随决策树数量变化曲线、特征基因的森林图可视化。
+- **应用场景**：从 WGCNA 模块或差异基因中进一步提纯核心标志物，避免过拟合。
+
+### 🔗 5. `ppi_regulation` — 蛋白互作与调控网络
+- **功能**：整合 STRING 数据库进行蛋白-蛋白互作（PPI）网络构建，并可扩展至转录因子-靶基因调控网络。
+- **典型输出**：PPI 网络图（Cytoscape 兼容格式）、枢纽蛋白（Hub protein）鉴定、模块聚类。
+- **应用场景**：揭示标志物之间的功能协同关系，挖掘上游调控机制。
+
+## 🚀 快速开始
+
+### 环境依赖
+建议使用 R (>= 4.0)，核心依赖包如下：
+```r
+# 网络与共表达
+install.packages("WGCNA")
+
+# 免疫浸润
+install.packages("e1071")
+install.packages("preprocessCore")
+# CIBERSORT.R 脚本需单独下载并 source()
+
+# 生存分析与可视化
+install.packages(c("survival", "survminer", "timeROC", "forestplot"))
+
+# 随机森林
+install.packages("randomForest")
+
+# PPI 网络（通常导出至 Cytoscape，R 内可用 igraph）
+install.packages("igraph")
